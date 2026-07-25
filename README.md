@@ -7,6 +7,12 @@ class imbalance — interpolation-based oversampling (**SMOTE**, **SMOTE-NC**), 
 oversampling (**CTGAN**), cost-sensitive learning (**class weights**), and
 **decision-threshold tuning** — all evaluated with a `RandomForestClassifier`.
 
+**Headline result:** none of the oversampling methods beat the plain baseline's ranking
+(PR-AUC 0.127), and CTGAN was ~32% worse. Simply moving the decision threshold from 0.5 to
+0.13 on the untouched baseline took F1 from **0.001 → 0.212** and frauds caught from
+**1 → 506** out of 2,206 — the same model, read at a sane cutoff.
+[Full results ↓](#results)
+
 ---
 
 ## The dataset
@@ -83,8 +89,12 @@ The `data/` folder contains the six official BAF variants. This project uses **`
   threshold are fit on training data only; the test set is touched exactly once, at
   evaluation.
 - **Fair comparison.** Every resampler targets the *same* minority ratio
-  (`SAMPLING_STRATEGY`), so the comparison isolates *how* synthetic samples are made, not
-  *how many*.
+  (`SAMPLING_STRATEGY = 0.10`, i.e. 1:10 after resampling — not full balance), so the
+  comparison isolates *how* synthetic samples are made, not *how many*.
+- **Thresholds tuned on validation, never on test.** Section 14 carves a 25% validation
+  split out of *train* to pick the cutoff, so those models are fit on 600k rows rather than
+  800k. That is why the baseline's PR-AUC differs slightly between sections (0.1273 in
+  Section 9, 0.1268 in Section 14) — less training data, not a different method.
 - **Honest metrics.** At 1:90 imbalance, **accuracy is meaningless** and ROC-AUC is
   flattered by the large true-negative count. **PR-AUC** is treated as the headline
   metric, alongside precision, recall, and F1.
@@ -119,27 +129,73 @@ pass; Section 14 does not depend on CTGAN.
 
 ---
 
+## Results
+
+Test set: **200,000** applications, **2,206** fraudulent (single stratified split,
+`random_state=42`; exact numbers vary by run and epoch count).
+
+| Approach | Precision | Recall | F1 | ROC-AUC | PR-AUC |
+|---|---|---|---|---|---|
+| Baseline RF @ 0.5 | 0.333 | 0.001 | 0.001 | 0.832 | 0.127 |
+| SMOTE RF | 0.475 | 0.017 | 0.033 | 0.850 | **0.129** |
+| SMOTE-NC RF | 0.252 | 0.075 | 0.116 | **0.859** | 0.111 |
+| CTGAN RF | 0.237 | 0.031 | 0.055 | 0.835 | 0.087 |
+| Balanced RF @ 0.5 | 0.800 | 0.002 | 0.004 | 0.824 | 0.112 |
+| **RF @ best-F1 threshold (0.13)** | 0.197 | 0.229 | **0.212** | 0.830 | 0.127 |
+| RF @ recall≥50% threshold (0.05) | 0.080 | **0.532** | 0.139 | 0.830 | 0.127 |
+| Balanced RF @ best-F1 threshold | 0.156 | 0.259 | 0.195 | 0.828 | 0.107 |
+
+Accuracy is omitted deliberately — every row scores 0.93–0.99 and none of it is
+informative at 1:90.
+
+### The same table, in operational terms
+
+| Approach | Frauds caught | Frauds missed | False alarms |
+|---|---|---|---|
+| Baseline RF @ 0.5 | 1 | 2,205 | 2 |
+| SMOTE RF | 38 | 2,168 | 42 |
+| SMOTE-NC RF | 166 | 2,040 | 494 |
+| CTGAN RF | 68 | 2,138 | 219 |
+| Balanced RF @ 0.5 | 4 | 2,202 | 1 |
+| **RF @ best-F1 threshold** | **506** | 1,700 | 2,066 |
+| RF @ recall≥50% threshold | **1,173** | 1,033 | 13,502 |
+| Balanced RF @ best-F1 threshold | 571 | 1,635 | 3,088 |
+
 ## Summary of findings
 
-Representative results (single stratified split; exact numbers vary by run and epoch count):
+- **No oversampling method beat the baseline on PR-AUC.** SMOTE was nominally best
+  (0.129 vs 0.127), a gap well inside single-split noise. SMOTE-NC (0.111) landed ~13%
+  *below* baseline and CTGAN (0.087) ~32% below. SMOTE-NC did buy a genuinely better
+  ranking by ROC-AUC (0.859, best overall) and the best F1 of any oversampler (0.116) —
+  but not better precision-recall trade-off where it counts.
+- **CTGAN did not earn its complexity.** It is the worst configuration tested on PR-AUC,
+  after ~40 minutes of training, despite passing its fidelity checks. Its synthetic fraud
+  was systematically *milder* than real fraud (feature means shifted toward the legitimate
+  class), so it blurred the decision boundary instead of sharpening it.
+- **The bottleneck is the decision threshold, not a shortage of synthetic fraud.** The
+  baseline ranked fraud far better than chance (ROC-AUC 0.83) yet caught **1 fraud out of
+  2,206** at the default 0.5 cutoff. Moving the cutoff to 0.13 takes the *same model* to
+  506 frauds caught — F1 0.001 → 0.212, a ~235× improvement at zero data-fabrication cost.
+- **Threshold tuning does not improve the model; it makes an already-adequate model
+  usable.** All three threshold rows share an identical PR-AUC of 0.127 because they are
+  one model with one ranking, read at three cutoffs. This is the central result: the
+  oversampling methods were competing to fix a problem that was never in the ranking.
+- **Class weights alone were not the answer.** `class_weight="balanced"` *lowered* PR-AUC
+  (0.112 vs 0.127) and still caught only 4 frauds at the default cutoff. Combined with
+  threshold tuning it reached F1 0.195 — respectable, but still short of plain RF +
+  threshold tuning (0.212). It trades precision for recall (571 caught vs 506, at 3,088
+  false alarms vs 2,066), which is a reasonable choice operationally but not a free win.
+- Sub-percent gaps are within noise on a single split; confirm with repeated stratified
+  splits before drawing firm conclusions. The threshold effect is two orders of magnitude
+  and does not need that caveat.
 
-- **No oversampling method meaningfully beat the baseline on PR-AUC.** SMOTE was
-  marginally best; SMOTE-NC and CTGAN were level with or slightly below baseline.
-- **CTGAN did not earn its complexity here.** Despite good fidelity, its synthetic fraud
-  was systematically *milder* than real fraud (feature means shifted toward the
-  legitimate class), which nudged PR-AUC down rather than up.
-- **The real bottleneck is the decision threshold, not a shortage of synthetic fraud.**
-  Every model ranked fraud far better than chance yet had near-zero recall at the default
-  0.5 cutoff. **Threshold tuning** (and `class_weight="balanced"`) converts that good
-  ranking into usable recall at **zero data-fabrication cost** — the practical
-  recommendation.
-- Differences of a few tenths of a percent are within noise on a single split; confirm
-  with repeated stratified splits before drawing firm conclusions.
-
-> Takeaway: on a well-suited dataset (large minority, genuine mixed types, verified
-> generator fidelity), interpolation-based and generative oversampling still failed to
-> beat a plain baseline's *ranking*, and cost-sensitive learning plus threshold tuning
-> was the most effective, cheapest intervention.
+> **Takeaway:** on a dataset well suited to it (large minority, genuine mixed types,
+> verified generator fidelity), both interpolation-based and generative oversampling
+> failed to beat a plain baseline's *ranking* — and generative oversampling actively hurt.
+> Tuning the decision threshold on the untouched baseline was the most effective and by
+> far the cheapest intervention. Pick the operating point from the business cost of a
+> missed fraud versus a manual review: threshold 0.13 for balance, 0.05 to catch half of
+> all fraud at ~13.5k reviews per 200k applications.
 
 ---
 
